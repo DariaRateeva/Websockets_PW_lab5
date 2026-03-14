@@ -10,6 +10,8 @@ from urllib.parse import urlparse, quote_plus, parse_qs
 from bs4 import BeautifulSoup
 
 
+
+# CACHE
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".go2web_cache")
 CACHE_INDEX = os.path.join(CACHE_DIR, "index.json")
 
@@ -68,10 +70,11 @@ def cache_put(url, headers, body):
         f.write(body)
 
 
+# RAW HTTP REQUEST via TCP SOCKET
 def make_raw_request(url, max_redirects=10, use_cache=True):
     """
     Perform an HTTP/1.1 GET request using only raw sockets.
-    Handles HTTPS, redirects, chunked encoding, and cache.
+    Handles HTTPS, redirects, chunked encoding, cache, and content negotiation.
     Returns (headers_dict, body_string, final_url).
     """
     for redirect_num in range(max_redirects + 1):
@@ -93,12 +96,12 @@ def make_raw_request(url, max_redirects=10, use_cache=True):
             if "last-modified" in meta:
                 conditional_headers += f"If-Modified-Since: {meta['last-modified']}\r\n"
 
-        # --- Build raw HTTP request ---
+        # --- Build raw HTTP request with content negotiation ---
         request = (
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {host}\r\n"
             f"User-Agent: go2web/1.0\r\n"
-            f"Accept: text/html, */*\r\n"
+            f"Accept: application/json, text/html;q=0.9, */*;q=0.8\r\n"
             f"Accept-Encoding: identity\r\n"
             f"Connection: close\r\n"
             f"{conditional_headers}"
@@ -211,13 +214,23 @@ def _decode_chunked(raw):
     return decoded
 
 
-
+# CONTENT RENDERING
 def render_response(headers, body):
     """
     Render the response body as human-readable text.
-    Strips HTML tags using BeautifulSoup.
+    Handles both JSON and HTML content types (content negotiation).
     """
     content_type = headers.get("content-type", "")
+
+    # --- JSON response ---
+    if "application/json" in content_type:
+        try:
+            data = json.loads(body)
+            print("\n[Content-Type: JSON]\n")
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+            return
+        except json.JSONDecodeError:
+            pass  # Fall through to HTML/text handling
 
     # --- HTML response ---
     if "text/html" in content_type or "<html" in body.lower()[:200]:
@@ -235,6 +248,7 @@ def render_response(headers, body):
     print(f"\n{body}")
 
 
+# SEARCH
 def search(term):
     """
     Search using DuckDuckGo (HTML version) and return top 10 results.
@@ -311,6 +325,7 @@ def interactive_search(term):
             print("Invalid input. Enter a number or 'q'.")
 
 
+# CLI
 HELP_TEXT = """\
 go2web - A command-line HTTP client (raw sockets)
 
@@ -323,11 +338,13 @@ Features:
   - HTTP and HTTPS support
   - Automatic redirect following
   - HTTP caching (ETag / Last-Modified)
+  - Content negotiation (JSON + HTML)
   - Interactive search result navigation
 
 Examples:
   go2web -u https://example.com
   go2web -s "python sockets tutorial"
+  go2web -u https://api.github.com/repos/torvalds/linux
 """
 
 
