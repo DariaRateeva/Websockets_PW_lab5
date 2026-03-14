@@ -6,8 +6,13 @@ from urllib.parse import urlparse, quote_plus, parse_qs
 from bs4 import BeautifulSoup
 
 
-def make_raw_request(url, max_redirects=10):
 
+def make_raw_request(url, max_redirects=10):
+    """
+    Perform an HTTP/1.1 GET request using only raw sockets.
+    Handles HTTPS, redirects, and chunked encoding.
+    Returns (headers_dict, body_string, final_url).
+    """
     for redirect_num in range(max_redirects + 1):
         parsed = urlparse(url)
         scheme = parsed.scheme or "http"
@@ -123,6 +128,7 @@ def _decode_chunked(raw):
         data = data[chunk_end + 2:]  # skip trailing \r\n
     return decoded
 
+
 def render_response(headers, body):
     """
     Render the response body as human-readable text.
@@ -144,6 +150,7 @@ def render_response(headers, body):
 
     # --- Plain text or other ---
     print(f"\n{body}")
+
 
 def search(term):
     """
@@ -186,6 +193,41 @@ def display_search_results(results):
         print(f"     {url}\n")
 
 
+def interactive_search(term):
+    """
+    Search and allow the user to pick a result to open.
+    Bonus: clickable results via CLI.
+    """
+    results = search(term)
+    display_search_results(results)
+
+    if not results:
+        return
+
+    print("Enter a result number to open it, or 'q' to quit:")
+    while True:
+        try:
+            choice = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if choice.lower() in ("q", "quit", "exit", ""):
+            break
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(results):
+                title, url = results[idx]
+                print(f"\nFetching: {url}\n" + "-" * 60)
+                headers, body, final_url = make_raw_request(url)
+                render_response(headers, body)
+                print("\n" + "-" * 60)
+                print("\nEnter another number, or 'q' to quit:")
+            else:
+                print(f"Please enter a number between 1 and {len(results)}.")
+        except ValueError:
+            print("Invalid input. Enter a number or 'q'.")
+
+
 HELP_TEXT = """\
 go2web - A command-line HTTP client (raw sockets)
 
@@ -226,8 +268,7 @@ def main():
             sys.exit(1)
         term = " ".join(args[1:])
         print(f'Searching for: "{term}"')
-        results = search(term)
-        display_search_results(results)
+        interactive_search(term)
 
     else:
         print(f"Unknown option: {args[0]}")
