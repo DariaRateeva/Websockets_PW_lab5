@@ -4,82 +4,98 @@ import ssl
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
+def make_raw_request(url, max_redirects=10):
 
-def make_raw_request(url):
-    """
-    Perform an HTTP/1.1 GET request using only raw sockets.
-    Handles HTTPS via ssl wrapping.
-    Returns (headers_dict, body_string).
-    """
-    parsed = urlparse(url)
-    scheme = parsed.scheme or "http"
-    host = parsed.hostname
-    port = parsed.port or (443 if scheme == "https" else 80)
-    path = parsed.path or "/"
-    if parsed.query:
-        path += "?" + parsed.query
+    for redirect_num in range(max_redirects + 1):
+        parsed = urlparse(url)
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname
+        port = parsed.port or (443 if scheme == "https" else 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
 
-    # --- Build raw HTTP request ---
-    request = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}\r\n"
-        f"User-Agent: go2web/1.0\r\n"
-        f"Accept: text/html, */*\r\n"
-        f"Accept-Encoding: identity\r\n"
-        f"Connection: close\r\n"
-        f"\r\n"
-    )
+        # --- Build raw HTTP request ---
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"User-Agent: go2web/1.0\r\n"
+            f"Accept: text/html, */*\r\n"
+            f"Accept-Encoding: identity\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        )
 
-    # --- Open TCP socket ---
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(15)
+        # --- Open TCP socket ---
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(15)
 
-    try:
-        if scheme == "https":
-            context = ssl.create_default_context()
-            sock = context.wrap_socket(sock, server_hostname=host)
-        sock.connect((host, port))
-        sock.sendall(request.encode("utf-8"))
+        try:
+            if scheme == "https":
+                context = ssl.create_default_context()
+                sock = context.wrap_socket(sock, server_hostname=host)
+            sock.connect((host, port))
+            sock.sendall(request.encode("utf-8"))
 
-        # --- Receive full response ---
-        response = b""
-        while True:
-            try:
-                chunk = sock.recv(4096)
-                if not chunk:
+            # --- Receive full response ---
+            response = b""
+            while True:
+                try:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+                except socket.timeout:
                     break
-                response += chunk
-            except socket.timeout:
+        finally:
+            sock.close()
+
+        # --- Split headers and body ---
+        header_end = response.find(b"\r\n\r\n")
+        if header_end == -1:
+            return {}, response.decode("utf-8", errors="replace"), url
+
+        raw_headers = response[:header_end].decode("utf-8", errors="replace")
+        raw_body = response[header_end + 4:]
+
+        # --- Parse status line ---
+        header_lines = raw_headers.split("\r\n")
+        status_line = header_lines[0]
+        status_code = int(status_line.split()[1])
+
+        # --- Parse headers into dict ---
+        headers = {}
+        for line in header_lines[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+
+        # --- Handle chunked transfer encoding ---
+        if headers.get("transfer-encoding", "").lower() == "chunked":
+            body = _decode_chunked(raw_body)
+        else:
+            body = raw_body
+
+        body_str = body.decode("utf-8", errors="replace")
+
+        # --- Handle redirects (301, 302, 303, 307, 308) ---
+        if status_code in (301, 302, 303, 307, 308):
+            location = headers.get("location", "")
+            if not location:
                 break
-    finally:
-        sock.close()
+            # Handle relative redirects
+            if location.startswith("/"):
+                location = f"{scheme}://{host}{location}"
+            elif not location.startswith("http"):
+                location = f"{scheme}://{host}/{location}"
+            print(f"  [redirect {status_code} -> {location}]")
+            url = location
+            continue
 
-    # --- Split headers and body ---
-    header_end = response.find(b"\r\n\r\n")
-    if header_end == -1:
-        return {}, response.decode("utf-8", errors="replace")
+        return headers, body_str, url
 
-    raw_headers = response[:header_end].decode("utf-8", errors="replace")
-    raw_body = response[header_end + 4:]
-
-    # --- Parse status line ---
-    header_lines = raw_headers.split("\r\n")
-
-    # --- Parse headers into dict ---
-    headers = {}
-    for line in header_lines[1:]:
-        if ":" in line:
-            k, v = line.split(":", 1)
-            headers[k.strip().lower()] = v.strip()
-
-    # --- Handle chunked transfer encoding ---
-    if headers.get("transfer-encoding", "").lower() == "chunked":
-        body = _decode_chunked(raw_body)
-    else:
-        body = raw_body
-
-    body_str = body.decode("utf-8", errors="replace")
-    return headers, body_str
+    # If we exhausted redirects
+    return headers, body_str, url
 
 
 def _decode_chunked(raw):
@@ -105,11 +121,6 @@ def _decode_chunked(raw):
         data = data[chunk_end + 2:]  # skip trailing \r\n
     return decoded
 
-
-# ===========================================================================
-# CONTENT RENDERING
-# ===========================================================================
-
 def render_response(headers, body):
     """
     Render the response body as human-readable text.
@@ -133,9 +144,6 @@ def render_response(headers, body):
     print(f"\n{body}")
 
 
-# ===========================================================================
-# CLI
-# ===========================================================================
 
 HELP_TEXT = """\
 go2web - A command-line HTTP client (raw sockets)
@@ -167,7 +175,7 @@ def main():
         if not url.startswith("http://") and not url.startswith("https://"):
             url = "https://" + url
         print(f"Fetching: {url}")
-        headers, body = make_raw_request(url)
+        headers, body, final_url = make_raw_request(url)
         render_response(headers, body)
 
     elif args[0] == "-s":
