@@ -1,9 +1,11 @@
 import sys
 import socket
 import ssl
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus, parse_qs
 
 from bs4 import BeautifulSoup
+
+
 def make_raw_request(url, max_redirects=10):
 
     for redirect_num in range(max_redirects + 1):
@@ -143,6 +145,45 @@ def render_response(headers, body):
     # --- Plain text or other ---
     print(f"\n{body}")
 
+def search(term):
+    """
+    Search using DuckDuckGo (HTML version) and return top 10 results.
+    Returns list of (title, url) tuples.
+    """
+    query = quote_plus(term)
+    search_url = f"https://html.duckduckgo.com/html/?q={query}"
+
+    headers, body, _ = make_raw_request(search_url)
+
+    soup = BeautifulSoup(body, "html.parser")
+    results = []
+
+    for link in soup.select("a.result__a"):
+        title = link.get_text(strip=True)
+        href = link.get("href", "")
+        # DuckDuckGo wraps URLs — extract the actual URL
+        if "uddg=" in href:
+            parsed_href = urlparse(href)
+            qs = parse_qs(parsed_href.query)
+            if "uddg" in qs:
+                href = qs["uddg"][0]
+        if title and href and href.startswith("http"):
+            results.append((title, href))
+        if len(results) >= 10:
+            break
+
+    return results
+
+
+def display_search_results(results):
+    """Print search results in a numbered list."""
+    if not results:
+        print("\nNo results found.")
+        return
+    print(f"\nTop {len(results)} results:\n")
+    for i, (title, url) in enumerate(results, 1):
+        print(f"  {i}. {title}")
+        print(f"     {url}\n")
 
 
 HELP_TEXT = """\
@@ -184,7 +225,9 @@ def main():
             print("Usage: go2web -s <search-term>")
             sys.exit(1)
         term = " ".join(args[1:])
-        print(f"TODO: search for \"{term}\"")
+        print(f'Searching for: "{term}"')
+        results = search(term)
+        display_search_results(results)
 
     else:
         print(f"Unknown option: {args[0]}")
