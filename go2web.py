@@ -2,6 +2,9 @@ import sys
 import socket
 import ssl
 from urllib.parse import urlparse
+
+from bs4 import BeautifulSoup
+
 def make_raw_request(url):
     """
     Perform an HTTP/1.1 GET request using only raw sockets.
@@ -104,6 +107,33 @@ def _decode_chunked(raw):
 
 
 # ===========================================================================
+# CONTENT RENDERING
+# ===========================================================================
+
+def render_response(headers, body):
+    """
+    Render the response body as human-readable text.
+    Strips HTML tags using BeautifulSoup.
+    """
+    content_type = headers.get("content-type", "")
+
+    # --- HTML response ---
+    if "text/html" in content_type or "<html" in body.lower()[:200]:
+        soup = BeautifulSoup(body, "html.parser")
+        # Remove script and style elements
+        for tag in soup(["script", "style", "noscript", "iframe"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        # Collapse multiple blank lines
+        lines = [line for line in text.splitlines() if line.strip()]
+        print("\n" + "\n".join(lines))
+        return
+
+    # --- Plain text or other ---
+    print(f"\n{body}")
+
+
+# ===========================================================================
 # CLI
 # ===========================================================================
 
@@ -138,8 +168,7 @@ def main():
             url = "https://" + url
         print(f"Fetching: {url}")
         headers, body = make_raw_request(url)
-        # For now just print raw body
-        print(body)
+        render_response(headers, body)
 
     elif args[0] == "-s":
         if len(args) < 2:
