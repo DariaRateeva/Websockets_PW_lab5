@@ -1,16 +1,77 @@
 import sys
 import socket
 import ssl
+import json
+import os
+import hashlib
+import time
 from urllib.parse import urlparse, quote_plus, parse_qs
 
 from bs4 import BeautifulSoup
 
 
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".go2web_cache")
+CACHE_INDEX = os.path.join(CACHE_DIR, "index.json")
 
-def make_raw_request(url, max_redirects=10):
+
+def _ensure_cache_dir():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    if not os.path.exists(CACHE_INDEX):
+        with open(CACHE_INDEX, "w") as f:
+            json.dump({}, f)
+
+
+def _load_cache_index():
+    _ensure_cache_dir()
+    with open(CACHE_INDEX, "r") as f:
+        return json.load(f)
+
+
+def _save_cache_index(index):
+    _ensure_cache_dir()
+    with open(CACHE_INDEX, "w") as f:
+        json.dump(index, f, indent=2)
+
+
+def _url_hash(url):
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
+def cache_get(url):
+    """Return cached (headers_dict, body) and cache metadata, or None."""
+    index = _load_cache_index()
+    key = _url_hash(url)
+    if key not in index:
+        return None
+    entry = index[key]
+    body_path = os.path.join(CACHE_DIR, key + ".body")
+    if not os.path.exists(body_path):
+        return None
+    with open(body_path, "r", encoding="utf-8", errors="replace") as f:
+        body = f.read()
+    return entry, body
+
+
+def cache_put(url, headers, body):
+    """Store response in cache."""
+    index = _load_cache_index()
+    key = _url_hash(url)
+    entry = {"url": url, "time": time.time()}
+    if "etag" in headers:
+        entry["etag"] = headers["etag"]
+    if "last-modified" in headers:
+        entry["last-modified"] = headers["last-modified"]
+    index[key] = entry
+    _save_cache_index(index)
+    body_path = os.path.join(CACHE_DIR, key + ".body")
+    with open(body_path, "w", encoding="utf-8", errors="replace") as f:
+        f.write(body)
+
+
+def make_raw_request(url, max_redirects=10, use_cache=True):
     """
     Perform an HTTP/1.1 GET request using only raw sockets.
-    Handles HTTPS, redirects, and chunked encoding.
+    Handles HTTPS, redirects, chunked encoding, and cache.
     Returns (headers_dict, body_string, final_url).
     """
     for redirect_num in range(max_redirects + 1):
@@ -22,6 +83,16 @@ def make_raw_request(url, max_redirects=10):
         if parsed.query:
             path += "?" + parsed.query
 
+        # --- Check cache (conditional GET) ---
+        cached = cache_get(url) if use_cache else None
+        conditional_headers = ""
+        if cached:
+            meta, cached_body = cached
+            if "etag" in meta:
+                conditional_headers += f"If-None-Match: {meta['etag']}\r\n"
+            if "last-modified" in meta:
+                conditional_headers += f"If-Modified-Since: {meta['last-modified']}\r\n"
+
         # --- Build raw HTTP request ---
         request = (
             f"GET {path} HTTP/1.1\r\n"
@@ -30,6 +101,7 @@ def make_raw_request(url, max_redirects=10):
             f"Accept: text/html, */*\r\n"
             f"Accept-Encoding: identity\r\n"
             f"Connection: close\r\n"
+            f"{conditional_headers}"
             f"\r\n"
         )
 
@@ -77,6 +149,12 @@ def make_raw_request(url, max_redirects=10):
                 k, v = line.split(":", 1)
                 headers[k.strip().lower()] = v.strip()
 
+        # --- Handle 304 Not Modified (cache hit) ---
+        if status_code == 304 and cached:
+            print(f"  [cache hit for {host}{path}]")
+            _, cached_body = cached
+            return headers, cached_body, url
+
         # --- Handle chunked transfer encoding ---
         if headers.get("transfer-encoding", "").lower() == "chunked":
             body = _decode_chunked(raw_body)
@@ -98,6 +176,10 @@ def make_raw_request(url, max_redirects=10):
             print(f"  [redirect {status_code} -> {location}]")
             url = location
             continue
+
+        # --- Store in cache ---
+        if use_cache and status_code == 200:
+            cache_put(url, headers, body_str)
 
         return headers, body_str, url
 
@@ -127,6 +209,7 @@ def _decode_chunked(raw):
         decoded += data[chunk_start:chunk_end]
         data = data[chunk_end + 2:]  # skip trailing \r\n
     return decoded
+
 
 
 def render_response(headers, body):
@@ -160,7 +243,7 @@ def search(term):
     query = quote_plus(term)
     search_url = f"https://html.duckduckgo.com/html/?q={query}"
 
-    headers, body, _ = make_raw_request(search_url)
+    headers, body, _ = make_raw_request(search_url, use_cache=False)
 
     soup = BeautifulSoup(body, "html.parser")
     results = []
@@ -235,6 +318,12 @@ Usage:
   go2web -u <URL>          Make an HTTP request to the URL and print the response
   go2web -s <search-term>  Search the term and print top 10 results
   go2web -h                Show this help
+
+Features:
+  - HTTP and HTTPS support
+  - Automatic redirect following
+  - HTTP caching (ETag / Last-Modified)
+  - Interactive search result navigation
 
 Examples:
   go2web -u https://example.com
