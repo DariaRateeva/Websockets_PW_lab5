@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.go2web_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
